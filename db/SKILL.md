@@ -1,6 +1,6 @@
 ---
 name: db
-description: Oracle Database guidance for SQL, PL/SQL, SQLcl, ORDS, Oracle Vector SDK, administration, app development, performance, security, migrations, and agent-safe database workflows. Use when the user asks to write, edit, rewrite, review, format, debug, tune, or explain SQL; create or refactor PL/SQL; use Oracle VecDB through the Python SDK, REST API, or DBMS_VECTOR_DATABASE package; use SQLcl, Liquibase, ORDS, JDBC, node-oracledb, Python, Java, .NET, or database frameworks; troubleshoot vector tables, embeddings, vector search, reranking, queries, sessions, locks, waits, indexes, optimizer plans, AWR, ASH, migrations, schemas, users, roles, privileges, backup, recovery, Data Guard, RAC, multitenant, containers, monitoring, auditing, encryption, VPD, or safe agent database operations.
+description: Oracle Database guidance for SQL, PL/SQL, SQLcl, ORDS, Oracle Vector SDK, administration, app development, performance, security, migrations, and agent-safe database workflows. Use when the user asks to write, edit, rewrite, review, format, debug, tune, or explain SQL; create or refactor PL/SQL; use Oracle VecDB through the Python SDK, REST API, or DBMS_VECTOR_DATABASE package; use SQLcl, Liquibase, ORDS, JDBC, node-oracledb, Python, Java, .NET, or database frameworks; troubleshoot vector tables, embeddings, vector search, reranking, queries, sessions, locks, waits, Resource Manager plans and consumer groups, runaway queries, indexes, optimizer plans, AWR, ASH, migrations, schemas, users, roles, privileges, backup, recovery, Data Guard, RAC, multitenant, containers, monitoring, auditing, encryption, VPD, or safe agent database operations.
 ---
 
 # Oracle Database Skills
@@ -45,13 +45,13 @@ db/
 | Data Guard, redo/undo logs, users | `db/admin/` |
 | Safe DML, destructive operation guards, idempotency, schema discovery, ORA- error handling | `db/agent/` |
 | JDBC, JDBC Extensions, Python, .NET, pooling, JSON, XML, spatial, Oracle Text, transactions, MLE, language drivers | `db/appdev/` |
-| RAC, Multitenant, Exadata, In-Memory, OCI database services, Data Guard architecture | `db/architecture/` |
+| RAC, Multitenant, Exadata (Smart Scan, IORM), In-Memory, OCI database services, Data Guard architecture | `db/architecture/` |
 | Backup, recovery, RMAN, Autonomous Recovery Service, Cloud Protect | `db/backup-recovery/` |
 | OCR database-category container images and pull guidance | `db/containers/` |
 | ERD, data modeling, partitioning, tablespaces | `db/design/` |
 | Schema migrations, online operations, edition-based redefinition, testing, version control | `db/devops/` |
 | Guidance and assistance for triaging data guard configuration and environment related issues | `db/data-guard/` |
-| AQ, DBMS_SCHEDULER, materialized views, DBLinks, APEX, vector search, SELECT AI | `db/features/` |
+| AQ, DBMS_SCHEDULER, Resource Manager (consumer groups, plans, runaway-query control, PDB I/O limits, instance caging), materialized views, DBLinks, APEX, vector search, SELECT AI | `db/features/` |
 | SQLAlchemy, Django, Pandas, Spring JPA, MyBatis, TypeORM, Sequelize, Dapper, GORM | `db/frameworks/` |
 | Migrations from PostgreSQL, MySQL, SQL Server, MongoDB, Snowflake, and more | `db/migrations/` |
 | Alert log, ADR, health monitor, space management, top SQL | `db/monitoring/` |
@@ -89,5 +89,6 @@ db/
 | Build a Java JDBC service | `java-oracle-jdbc` → `java-oracle-jdbc/dependencies` → `java-oracle-jdbc/connections` → `java-oracle-jdbc/sql` → `java-oracle-jdbc/pooling-production` → `java-oracle-jdbc/providers` (cloud secrets, tracing, Spring, Pkl) |
 | Perform agent-safe schema change | `schema-discovery` → `destructive-op-guards` → `idempotency-patterns` → `schema-migrations` |
 | Set up AI-driven database access via MCP | `security/deep-data-security` (end-user authorization) → `sqlcl-basics` (save connections) → `sqlcl-mcp-server` (configure + start) |
+| Protect OLTP from reporting/ad hoc workloads | `features/resource-manager` (plan, groups, mappings) → `features/dbms-scheduler` (windows, job classes) → `architecture/multitenant` (CDB plans, if consolidated) → `performance/wait-events` (verify `resmgr:*` waits land on the right groups) |
 | Set up an Oracle Vector SDK database deployment | `vecdb-provisioning` → Oracle Vector SDK Quick Start → **Prepare an AI Database** |
 | Build vector-based applications for semantic search, RAG, or recommendations using Oracle Vector SDK's fixed-schema APIs through the Python SDK, REST, or PL/SQL | `vecdb-architecture` → `vecdb-api-reference` → relevant capability file (`vecdb-models`, `vecdb-vector-tables`, `vecdb-search`, or `vecdb-indexes`) |
