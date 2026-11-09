@@ -229,55 +229,76 @@ WHERE  compress_for IN ('QUERY LOW', 'QUERY HIGH', 'ARCHIVE LOW', 'ARCHIVE HIGH'
 
 ## 4. I/O Resource Manager (IORM)
 
-IORM is a storage-cell-side resource manager that controls the I/O bandwidth allocation among databases, services, and consumer groups sharing the Exadata infrastructure. Unlike CPU-based DBRM (which runs on the DB server), IORM enforces I/O limits at the physical disk level inside CELLSRV.
+IORM runs inside CELLSRV on every storage server and arbitrates I/O among databases, PDBs, and consumer groups. It is the storage-side half of Resource Manager; the database-side half (consumer groups, plans, directives, mapping rules) is covered in `db/features/resource-manager.md`. On Exadata the PDB I/O limits `MAX_IOPS`/`MAX_MBPS` cannot be set (`ORA-56742`) — IORM replaces them.
 
-### IORM Plans
+### How the Plans Fit Together
 
-IORM plans are configured at three levels:
-1. **Inter-database plan**: Allocates I/O shares across different databases on the same Exadata
-2. **Intra-database plan**: Allocates I/O shares across consumer groups within a single database
-3. **Database plan with limits**: Caps the I/O bandwidth a specific database can consume
+| Plan | Configured where | Governs I/O among |
+|------|------------------|-------------------|
+| Database resource plan (*intradatabase*) | In the database: `DBMS_RESOURCE_MANAGER` + `RESOURCE_MANAGER_PLAN` | **Consumer groups** of one database. The active plan is sent to the cells and IORM uses its `MGMT_P1`…`MGMT_P8` shares. No plan enabled → the whole database is treated as one workload. |
+| CDB plan | In the CDB: `CREATE_CDB_PLAN`, `CREATE_CDB_PLAN_DIRECTIVE` | **PDBs**: `SHARES` and `UTILIZATION_LIMIT` become the PDBs' IORM shares and flash utilization limits (see `db/architecture/multitenant.md`). |
+| `dbplan` (*interdatabase*) | On every cell: `ALTER IORMPLAN dbplan=…` | **Databases** (by `DB_UNIQUE_NAME`) and performance profiles. |
+| `clusterplan` | On every cell: `ALTER IORMPLAN clusterplan=…` | **ASM clusters** sharing the cells. Exadata System Software 21.2.0+. |
+| `catplan` | — | Deprecated in Exadata System Software 21.2.0, **removed in 25.1.0**. Do not create new ones. |
+
+### IORM Objective
+
+| `objective` | Behavior |
+|-------------|----------|
+| `auto` | IORM picks latency vs throughput from the observed workload. Recommended; default for new deployments since Exadata System Software 21.2.0. |
+| `low_latency` | Favor small-I/O latency (OLTP); throttles large I/O hardest. |
+| `balanced` | Middle ground for mixed workloads. |
+| `high_throughput` | Favor scan throughput (DW); OLTP latency may suffer. |
+| `basic` | Only caps small-I/O latency; disables prioritization. Default in 20.1.0 and earlier. User-defined `dbplan`/`clusterplan` are fully effective only when the objective is **not** `basic`. |
+
+### Database-Side Prerequisites
+
+1. A resource plan is enabled (`RESOURCE_MANAGER_PLAN`) with `MGMT_P[1-8]` directives for every consumer group, and the **same plan on all RAC instances**.
+2. For PDBs, a CDB plan with `SHARES`/`UTILIZATION_LIMIT`. **26ai:** `IORM_LIMIT_POLICY` (CDB-level, `ALTER SYSTEM`) decides how PDB shares/limits are derived:
+   - `RM_PLAN` (default) — from the user CDB plan; if none is set (`DEFAULT_CDB_PLAN`), equal shares (or shares from `CPU_MIN_COUNT`/`CPU_COUNT`) and no limits.
+   - `CPU_COUNT_RATIO` — shares as above; each PDB's utilization limit = PDB `CPU_COUNT` ÷ CDB `CPU_COUNT`.
+   IORM utilization limits apply to **flash** IOPS/throughput only, not hard disk or XRMEM, and do not cap flash cache space.
 
 ```sql
--- Check current IORM settings (from CellCLI on storage cells)
--- CellCLI> LIST IORMPLAN DETAIL
-
--- Configure IORM from SQL*Plus (requires SYSDBA, 12c+)
-BEGIN
-    DBMS_RESOURCE_MANAGER.CREATE_PENDING_AREA();
-
-    -- Create a CDB plan for Exadata resource management
-    DBMS_RESOURCE_MANAGER.CREATE_CDB_PLAN(
-        plan    => 'EXADATA_IO_PLAN',
-        comment => 'Exadata I/O resource plan'
-    );
-
-    -- Assign shares to PDBs; shares and utilization_limit are used by Exadata IORM
-    DBMS_RESOURCE_MANAGER.CREATE_CDB_PLAN_DIRECTIVE(
-        plan               => 'EXADATA_IO_PLAN',
-        pluggable_database => 'OLTP_PDB',
-        shares             => 4,
-        utilization_limit  => 80
-    );
-
-    DBMS_RESOURCE_MANAGER.CREATE_CDB_PLAN_DIRECTIVE(
-        plan               => 'EXADATA_IO_PLAN',
-        pluggable_database => 'BATCH_PDB',
-        shares             => 2,
-        utilization_limit  => 40
-    );
-
-    DBMS_RESOURCE_MANAGER.VALIDATE_PENDING_AREA();
-    DBMS_RESOURCE_MANAGER.SUBMIT_PENDING_AREA();
-END;
-/
-
--- Activate the plan
-ALTER SYSTEM SET RESOURCE_MANAGER_PLAN = 'EXADATA_IO_PLAN' SCOPE = BOTH;
-
--- Verify the active resource plan
-SHOW PARAMETER resource_manager_plan;
+-- A session mapped to a group that is not in the active plan is silently moved to OTHER_GROUPS
+-- (and therefore gets OTHER_GROUPS' I/O share on the cells). Verify mapping before blaming IORM:
+SELECT s.username, s.service_name, cg.name AS mapped_group, og.name AS original_group
+FROM   v$rsrc_session_info ri
+JOIN   v$session s ON s.sid = ri.sid
+JOIN   v$rsrc_consumer_group cg ON cg.id = ri.current_consumer_group_id
+JOIN   v$rsrc_consumer_group og ON og.id = ri.orig_consumer_group_id
+WHERE  ri.current_consumer_group_id <> ri.orig_consumer_group_id;
 ```
+
+### Cell-Side Configuration (CellCLI)
+
+IORM is configured **individually on every storage server**; run the same commands on all cells (`dcli -g cell_group -l celladmin cellcli -e "..."`).
+
+```text
+CellCLI> ALTER IORMPLAN objective=auto
+
+CellCLI> ALTER IORMPLAN dbplan=((name=prod,    share=8, flashcachemin=400G),           -
+                                (name=rpt,     share=4, limit=50),                     -
+                                (name=dev,     share=1, limit=25, flashcache=off, flashlog=off), -
+                                (name=stby_db, share=2, role=standby),                 -
+                                (name=DEFAULT, share=1))
+
+CellCLI> LIST IORMPLAN DETAIL
+CellCLI> ALTER IORMPLAN dbplan=""          -- reset
+```
+
+`dbplan` directive attributes: `name` (`DB_UNIQUE_NAME`, a profile name, or `DEFAULT` for every database not listed); `share` (relative weight) **or** `level`+`allocation` (legacy percentage method — do not mix the two in one plan); `limit` (maximum flash I/O utilization, %); `flashcache`/`flashlog` (`on`|`off`); `flashcachemin` (guaranteed flash cache space), `flashcachelimit` (soft cap), `flashcachesize` (hard cap, 19.2.0+); `xrmemcache`/`xrmemlog` (23.1.0+; `pmemcache`/`pmemlog` before); `role` (`primary`|`standby`, Data Guard role-based directives); `asmcluster` (disambiguate same-named databases, 19.1.0+); `type=profile` (directive applies to every database whose `DB_PERFORMANCE_PROFILE` initialization parameter matches `name`).
+
+### Monitoring IORM
+
+```text
+CellCLI> LIST METRICCURRENT DB_IO_UTIL_LG, DB_IO_UTIL_SM ATTRIBUTES name, metricObjectName, metricValue
+CellCLI> LIST METRICCURRENT DB_IO_WT_SM_RQ, DB_IO_WT_LG_RQ ATTRIBUTES name, metricObjectName, metricValue
+CellCLI> LIST METRICCURRENT WHERE objectType = 'IORM_CONSUMER_GROUP' AND metricValue != 0 -
+         ATTRIBUTES name, metricObjectName, metricValue, collectionTime
+```
+
+Metric families use the prefixes `DB_` (database), `PDB_` (pluggable database), `CG_` (consumer group), with `_FD_` for flash disks and `_FC_` for flash cache. The two to watch: `*_IO_UTIL_SM`/`*_IO_UTIL_LG` (share of the storage server consumed by small/large I/O) and `*_IO_WT_SM_RQ`/`*_IO_WT_LG_RQ` (average time IORM queued each request). Non-zero `*_WT_*` means IORM is actively throttling that object; high `cell single block physical read` latency in the database with low cell-side waits points at hardware, not IORM. On the database side, `V$RSRC_CONSUMER_GROUP` and `V$RSRCPDBMETRIC` report the same workloads from the instance's view.
 
 ---
 
@@ -501,10 +522,15 @@ Exadata performance problems often originate in the storage cells (CELLSRV proce
 - Baseline guidance in this file is valid for Oracle Database 19c unless a newer minimum version is explicitly called out.
 - Features marked as 21c, 23c, or 23ai should be treated as Oracle Database 26ai-capable features; keep 19c-compatible alternatives for mixed-version estates.
 - For dual-support environments, test syntax and package behavior in both 19c and 26ai because defaults and deprecations can differ by release update.
+- **IORM (26ai):** `IORM_LIMIT_POLICY` (`RM_PLAN` | `CPU_COUNT_RATIO`) is new in Oracle AI Database 26ai and controls how PDB IORM shares and flash utilization limits are derived. IORM behavior also depends on the Exadata System Software release, not only the database release: `objective=auto` is the default from 21.2.0, `clusterplan` exists from 21.2.0, and `catplan` is removed in 25.1.0.
 
 ## Sources
 
 - [Oracle Exadata Database Machine System Overview](https://docs.oracle.com/en/engineered-systems/exadata-database-machine/) — Smart Scan, Storage Indexes, HCC, IORM
 - [Oracle Database SQL Language Reference 19c — COMPRESS clause](https://docs.oracle.com/en/database/oracle/oracle-database/19/sqlrf/CREATE-TABLE.html) — HCC compression levels
-- [DBMS_RESOURCE_MANAGER (19c)](https://docs.oracle.com/en/database/oracle/oracle-database/19/arpls/DBMS_RESOURCE_MANAGER.html) — IORM plan directives
-- [Oracle Exadata System Software User's Guide](https://docs.oracle.com/en/engineered-systems/exadata-database-machine/sagug/) — CellCLI, IORM configuration
+- [DBMS_RESOURCE_MANAGER (19c)](https://docs.oracle.com/en/database/oracle/oracle-database/19/arpls/DBMS_RESOURCE_MANAGER.html) — database resource plans and CDB plan directives used by IORM
+- [Oracle Exadata System Software User's Guide — Managing I/O Resources](https://docs.oracle.com/en/engineered-systems/exadata-database-machine/sagug/exadata-storage-server-iorm.html) — IORM concepts, plans, objective
+- [Oracle Exadata System Software User's Guide — ALTER IORMPLAN](https://docs.oracle.com/en/engineered-systems/exadata-database-machine/sagug/alter-iormplan.html) — `dbplan`/`clusterplan` directive syntax and attributes
+- [Oracle Exadata System Software User's Guide — Verifying the Configuration of I/O Resource Management](https://docs.oracle.com/en/engineered-systems/exadata-database-machine/sagug/verifying-configuration-i-o-resource-management.html) — database-side prerequisites, metrics
+- [Oracle AI Database Reference 26ai — IORM_LIMIT_POLICY](https://docs.oracle.com/en/database/oracle/oracle-database/26/refrn/IORM_LIMIT_POLICY.html)
+- [Database Error Messages — ORA-56742](https://docs.oracle.com/en/error-help/db/oci-56742) — `MAX_IOPS`/`MAX_MBPS` not usable on Exadata
